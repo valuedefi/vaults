@@ -533,20 +533,6 @@ contract ValueGovernanceVault is ERC20 {
         }
     }
 
-    // Withdraw without caring about rewards. EMERGENCY ONLY.
-    function emergencyWithdraw() external {
-        UserInfo storage user = userInfo[msg.sender];
-        if (user.lockedAmount > 0 && user.unlockedTime < block.timestamp) {
-            user.lockedAmount = 0;
-        }
-        uint _amount = user.amount.sub(user.lockedAmount);
-        user.amount = user.amount.sub(_amount);
-        user.valueRewardDebt = 0;
-        user.vusdRewardDebt = 0;
-        IERC20(address(this)).transfer(address(msg.sender), _amount);
-        emit EmergencyWithdraw(msg.sender, user.amount);
-    }
-
     // Safe valueToken mint, ensure it is never over cap and we are the current owner.
     function safeValueMint(address _to, uint _amount) internal {
         if (valueToken.minters(address(this)) && _to != address(0)) {
