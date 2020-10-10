@@ -1,13 +1,20 @@
-# vaults
-Value Vault is the core feature of YFValue in order to achieve long-term profitability of the token.
+<p align=center>
+<img width="128px" src="https://assets.coingecko.com/coins/images/12525/small/value_logo_-_500x500.png" alt="Value logo"/>
+</p>
 
-### Strategy
-A strategy must implement the following calls;
+<h1 align=center><code>Value Vaults</code></h1>
 
- - deposit()
- - withdraw(address) must exclude any tokens used in the yield - Controller role - withdraw should return to Controller
- - withdraw(uint256) - Controller | Vault role - withdraw should always return to vault
- - withdrawAll() - Controller | Vault role - withdraw should always return to vault
- - balanceOf()
+## Value Vaults
+https://valuedefi.io/value-vaults
 
-Where possible, strategies must remain as immutable as possible, instead of updating variables, we update the contract by linking it in the controller
+Value Vaults is the core feature of YFValue in order to achieve long-term profitability of the token.
+
+## Value Governance Vault (v2)
+https://valuedefi.io/stake
+
+The contract is deployed [here](https://etherscan.io/address/0x78d46e6b5c022ffbd1a558c65407ad28ad98e51b#code)
+
+ - VALUE can be staked
+ - Profit from farming strategies will be auto-compounded
+ - Locking VALUE in the vault for an extra period of time will boost VALUE yield
+ - Governance Vault v2 will support multiple strategy farming as well, our state-of-the-art farming innovation
