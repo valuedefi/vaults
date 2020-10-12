@@ -288,6 +288,7 @@ contract ValueGovernanceVault is ERC20 {
         }
         user.lockedAmount = user.lockedAmount.add(_locked);
         require(user.lockedAmount <= user.amount, "lockedAmount > amount");
+        user.lockedDays = _days;
         user.unlockedTime = block.timestamp.add(_days * 86400);
         // (%) = 5 + (lockedDays - 7) * 0.15
         user.boostedExtra = 50000000000 + (_days - 7) * 1500000000;

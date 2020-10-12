@@ -3,44 +3,22 @@
 pragma solidity 0.6.12;
 
 /*
-
-Here we have a list of constants. In order to get access to an address
-managed by ValueVaultMaster, the calling contract should copy and define
-some of these constants and use them as keys.
-
-Keys themselves are immutable. Addresses can be immutable or mutable.
-
-a) Vault addresses are immutable once set, and the list may grow:
-
-K_VAULT_WETH = 0;
-K_VAULT_USDT_ETH_SUSHI_LP = 1;
-K_VAULT_SOETH_ETH_UNI_V2_LP = 2;
-K_VAULT_SODA_ETH_UNI_V2_LP = 3;
-K_VAULT_GT = 4;
-K_VAULT_GT_ETH_UNI_V2_LP = 5;
-
-
-b) ValueMade token addresses are immutable once set, and the list may grow:
-
-K_MADE_SOETH = 0;
-
-
-c) Strategy addresses are mutable:
-
-K_STRATEGY_CREATE_SODA = 0;
-K_STRATEGY_EAT_SUSHI = 1;
-K_STRATEGY_SHARE_REVENUE = 2;
-
-
-d) Calculator addresses are mutable:
-
-K_CALCULATOR_WETH = 0;
-
-Solidity doesn't allow me to define global constants, so please
-always make sure the key name and key value are copied as the same
-in different contracts.
-*/
-
+ * Here we have a list of constants. In order to get access to an address
+ * managed by ValueVaultMaster, the calling contract should copy and define
+ * some of these constants and use them as keys.
+ * Keys themselves are immutable. Addresses can be immutable or mutable.
+ *
+ * Vault addresses are immutable once set, and the list may grow:
+ * K_VAULT_WETH = 0;
+ * K_VAULT_ETH_USDC_UNI_V2_LP = 1;
+ * K_VAULT_ETH_WBTC_UNI_V2_LP = 2;
+ *
+ * Strategy addresses are mutable:
+ * K_STRATEGY_WETH_SODA_POOL = 0;
+ * K_STRATEGY_WETH_MULTI_POOL = 1;
+ * K_STRATEGY_ETHUSDC_MULTIPOOL = 100;
+ * K_STRATEGY_ETHWBTC_MULTIPOOL = 200;
+ */
 
 /*
  * ValueVaultMaster manages all the vaults and strategies of our Value Vaults system.
@@ -49,45 +27,35 @@ contract ValueVaultMaster {
     address public governance;
 
     address public bank;
-    address public revenue;
-    address public dev;
+    address public minorPool;
+    address public profitSharer;
 
     address public govToken; // VALUE
-    address public wETH;
-    address public usdt; // we only used USDT to estimate APY
+    address public yfv; // When harvesting, convert some parts to YFV for govVault
+    address public usdc; // we only used USDC to estimate APY
 
-    address public govVaultProfitSharer;
+    address public govVault; // YFV -> VALUE, vUSD, vETH and 6.7% profit from Value Vaults
     address public insuranceFund = 0xb7b2Ea8A1198368f950834875047aA7294A2bDAa; // set to Governance Multisig at start
     address public performanceReward = 0x7Be4D5A99c903C437EC77A20CB6d0688cBB73c7f; // set to deploy wallet at start
 
+    uint256 public constant FEE_DENOMINATOR = 10000;
     uint256 public govVaultProfitShareFee = 670; // 6.7% | VIP-1 (https://yfv.finance/vip-vote/vip_1)
-    uint256 public insuranceFee = 100; // 1%
-    uint256 public performanceFee = 200; // 2%
-    uint256 public burnFee = 0; // 0%
-    uint256 public gasFee = 30; // 0.3%
+    uint256 public gasFee = 50; // 0.5% at start and can be set by governance decision
 
-    address public uniswapV2Factory;
+    uint256 public minStakeTimeToClaimVaultReward = 24 hours;
 
     mapping(address => bool) public isVault;
     mapping(uint256 => address) public vaultByKey;
 
-    mapping(address => bool) public isValueMade;
-    mapping(uint256 => address) public valueMadeByKey;
-
     mapping(address => bool) public isStrategy;
     mapping(uint256 => address) public strategyByKey;
+    mapping(address => uint256) public strategyQuota;
 
-    mapping(address => bool) public isCalculator;
-    mapping(uint256 => address) public calculatorByKey;
-
-    constructor(
-        address _govToken,
-        address _wETH,
-        address _usdt
-    ) public {
+    constructor(address _govToken, address _yfv, address _usdc) public {
         govToken = _govToken;
-        wETH = _wETH;
-        usdt = _usdt;
+        yfv = _yfv;
+        usdc = _usdc;
+        governance = tx.origin;
     }
 
     function setGovernance(address _governance) external {
@@ -102,23 +70,22 @@ contract ValueVaultMaster {
         bank = _bank;
     }
 
-    // Mutable in case we want to upgrade this module.  
-    function setRevenue(address _revenue) external {
+    // Mutable in case we want to upgrade the pool.
+    function setMinorPool(address _minorPool) external {
         require(msg.sender == governance, "!governance");
-        revenue = _revenue;
+        minorPool = _minorPool;
+    }
+
+    // Mutable in case we want to upgrade this module.
+    function setProfitSharer(address _profitSharer) external {
+        require(msg.sender == governance, "!governance");
+        profitSharer = _profitSharer;
     }
 
     // Mutable, in case governance want to upgrade VALUE to new version
     function setGovToken(address _govToken) external {
         require(msg.sender == governance, "!governance");
         govToken = _govToken;
-    }
-
-    // Mutable, in case Uniswap has changed or we want to switch to sushi.
-    // The core systems (ie. ValueBank), don't rely on Uniswap, so there is no risk.
-    function setUniswapV2Factory(address _uniswapV2Factory) external {
-        require(msg.sender == governance, "!governance");
-        uniswapV2Factory = _uniswapV2Factory;
     }
 
     // Immutable once added, and you can always add more.
@@ -130,20 +97,17 @@ contract ValueVaultMaster {
         vaultByKey[_key] = _vault;
     }
 
-    // Immutable once added, and you can always add more.
-    function addValueMade(uint256 _key, address _valueMade) external {
-        require(msg.sender == governance, "!governance");
-        require(valueMadeByKey[_key] == address(0), "valueMade: key is taken");
-
-        isValueMade[_valueMade] = true;
-        valueMadeByKey[_key] = _valueMade;
-    }
-
     // Mutable and removable.
     function addStrategy(uint256 _key, address _strategy) external {
         require(msg.sender == governance, "!governance");
         isStrategy[_strategy] = true;
         strategyByKey[_key] = _strategy;
+    }
+
+    // Set 0 to disable quota (no limit)
+    function setStrategyQuota(address _strategy, uint256 _quota) external {
+        require(msg.sender == governance, "!governance");
+        strategyQuota[_strategy] = _quota;
     }
 
     function removeStrategy(uint256 _key) external {
@@ -152,9 +116,9 @@ contract ValueVaultMaster {
         delete strategyByKey[_key];
     }
 
-    function setGovVaultProfitSharer(address _govVaultProfitSharer) public {
+    function setGovVault(address _govVault) public {
         require(msg.sender == governance, "!governance");
-        govVaultProfitSharer = _govVaultProfitSharer;
+        govVault = _govVault;
     }
 
     function setInsuranceFund(address _insuranceFund) public {
@@ -172,23 +136,28 @@ contract ValueVaultMaster {
         govVaultProfitShareFee = _govVaultProfitShareFee;
     }
 
-    function setPerformanceFee(uint256 _performanceFee) public {
-        require(msg.sender == governance, "!governance");
-        performanceFee = _performanceFee;
-    }
-
-    function setInsuranceFee(uint256 _insuranceFee) public {
-        require(msg.sender == governance, "!governance");
-        insuranceFee = _insuranceFee;
-    }
-
-    function setBurnFee(uint256 _burnFee) public {
-        require(msg.sender == governance, "!governance");
-        burnFee = _burnFee;
-    }
-
     function setGasFee(uint256 _gasFee) public {
         require(msg.sender == governance, "!governance");
         gasFee = _gasFee;
     }
+
+    function setMinStakeTimeToClaimVaultReward(uint256 _minStakeTimeToClaimVaultReward) public {
+        require(msg.sender == governance, "!governance");
+        minStakeTimeToClaimVaultReward = _minStakeTimeToClaimVaultReward;
+    }
+
+    /**
+     * This function allows governance to take unsupported tokens out of the contract.
+     * This is in an effort to make someone whole, should they seriously mess up.
+     * There is no guarantee governance will vote to return these.
+     * It also allows for removal of airdropped tokens.
+     */
+    function governanceRecoverUnsupported(IERC20x _token, uint256 amount, address to) external {
+        require(msg.sender == governance, "!governance");
+        _token.transfer(to, amount);
+    }
+}
+
+interface IERC20x {
+    function transfer(address recipient, uint256 amount) external returns (bool);
 }
