@@ -5,7 +5,7 @@ pragma solidity 0.6.12;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
 import "@openzeppelin/contracts/math/SafeMath.sol";
-import "./strategies/IStrategy.sol";
+import "./v1/strategies/IStrategy.sol";
 
 interface IValueVaultMaster {
     function minorPool() view external returns(address);

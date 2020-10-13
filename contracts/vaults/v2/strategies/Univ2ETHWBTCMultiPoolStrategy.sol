@@ -5,7 +5,7 @@ pragma solidity 0.6.12;
 import "@openzeppelin/contracts/math/SafeMath.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "./IStrategyV2.sol";
-import "../ValueVaultMaster.sol";
+import "../../ValueVaultMaster.sol";
 
 interface IOneSplit {
     function getExpectedReturn(
@@ -66,9 +66,9 @@ interface IValueVaultBank {
     function make_profit(uint256 _poolId, uint256 _amount) external;
 }
 
-// Deposit UNIv2ETHUSDC to a standard StakingRewards pool (eg. UNI Pool - https://app.uniswap.org/#/uni)
+    // Deposit UNIv2ETHWBTC to a standard StakingRewards pool (eg. UNI Pool - https://app.uniswap.org/#/uni)
 // Wait for Vault commands: deposit, withdraw, claim, harvest (can be called by public via Vault)
-contract Univ2ETHUSDCMultiPoolStrategy is IStrategyV2 {
+contract Univ2ETHWBTCMultiPoolStrategy is IStrategyV2 {
     using SafeMath for uint256;
 
     address public governance;
@@ -80,8 +80,8 @@ contract Univ2ETHUSDCMultiPoolStrategy is IStrategyV2 {
     IUniswapRouter public unirouter = IUniswapRouter(0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D);
 
     ValueVaultMaster public valueVaultMaster;
-    IERC20 public lpPair; // ETHUSDC_UNIv2
-    IERC20 public lpPairTokenA; // USDC
+    IERC20 public lpPair; // ETHWBTC_UNIv2
+    IERC20 public lpPairTokenA; // WBTC
     IERC20 public lpPairTokenB; // For this contract it will be always be WETH
 
     mapping(address => mapping(address => address[])) public uniswapPaths; // [input -> output] => uniswap_path
@@ -99,8 +99,8 @@ contract Univ2ETHUSDCMultiPoolStrategy is IStrategyV2 {
 
     bool public aggressiveMode; // will try to stake all lpPair tokens available (be forwarded from bank or from another strategies)
 
-    // lpPair: ETHUSDC_UNIv2 = 0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc
-    // lpPairTokenA: USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+    // lpPair: ETHWBTC_UNIv2 = 0xbb2b8038a1640196fbe3e38816f3e67cba72d940
+    // lpPairTokenA: WBTC = 0x2260fac5e5542a773aa44fbcfedf7c193bc2c599
     // lpPairTokenB: WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
     constructor(ValueVaultMaster _valueVaultMaster,
                 IERC20 _lpPair,
@@ -120,7 +120,7 @@ contract Univ2ETHUSDCMultiPoolStrategy is IStrategyV2 {
     }
 
     // targetToken: uniToken = 0x1f9840a85d5af5bf1d1762f925bdaddc4201f984
-    // targetPool: ETHUSDCUniPool = 0x7fba4b8dc5e7616e59622806932dbea72537a56b
+    // targetPool: ETHWBTCUniPool = 0xCA35e32e7926b96A9988f61d510E038108d8068e
     function setPoolInfo(uint256 _poolId, address _vault, IERC20 _targetToken, IStakingRewards _targetPool, uint256 _minHarvestForTakeProfit, uint256 _poolQuota) external {
         require(msg.sender == governance, "!governance");
         poolMap[_poolId].vault = _vault;
@@ -293,7 +293,7 @@ contract Univ2ETHUSDCMultiPoolStrategy is IStrategyV2 {
                 _reserved = _reserved.add(_govVaultProfitShareFee);
             }
 
-            uint256 wethToBuyTokenA = wethBal.sub(_reserved).div(2); // we have TokenB (WETH) already, so use 1/2 bal to buy TokenA (USDC)
+            uint256 wethToBuyTokenA = wethBal.sub(_reserved).div(2); // we have TokenB (WETH) already, so use 1/2 bal to buy TokenA (WBTC)
 
             _swapTokens(address(weth), address(lpPairTokenA), wethToBuyTokenA);
             _addLiquidity();
@@ -357,7 +357,7 @@ contract Univ2ETHUSDCMultiPoolStrategy is IStrategyV2 {
     }
 
     // Helper function, Should never use it on-chain.
-    // Return 1e18x of APY. _lpPairUsdcPrice = current lpPair price (1-wei in USDC-wei) multiple by 1e18
+    // Return 1e18x of APY. _lpPairUsdcPrice = current lpPair price (1-wei in WBTC-wei) multiple by 1e18
     function expectedAPY(uint256 _poolId, uint256 _lpPairUsdcPrice) public override view returns (uint256) {
         if (poolMap[_poolId].targetPool.totalSupply() == 0) return 0;
         uint256 investAmt = balanceOf(_poolId);
@@ -395,7 +395,7 @@ contract Univ2ETHUSDCMultiPoolStrategy is IStrategyV2 {
 
         // solium-disable-next-line security/no-call-value
         (bool success, bytes memory returnData) = target.call{value: value}(callData);
-        require(success, "Univ2ETHUSDCMultiPoolStrategy::executeTransaction: Transaction execution reverted.");
+        require(success, "Univ2ETHWBTCMultiPoolStrategy::executeTransaction: Transaction execution reverted.");
 
         emit ExecuteTransaction(target, value, signature, data);
 

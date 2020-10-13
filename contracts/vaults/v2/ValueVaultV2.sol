@@ -5,7 +5,7 @@ pragma solidity 0.6.12;
 import "@openzeppelin/contracts/math/SafeMath.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "./strategies/IStrategyV2.sol";
-import "./ValueVaultMaster.sol";
+import "../ValueVaultMaster.sol";
 
 interface IValueVault {
     function getStrategyCount() external view returns(uint256);

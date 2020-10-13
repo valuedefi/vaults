@@ -4,7 +4,7 @@ pragma solidity 0.6.12;
 
 import "@openzeppelin/contracts/math/SafeMath.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "../ValueVaultMaster.sol";
+import "../../ValueVaultMaster.sol";
 
 interface IStrategyV2p1 {
     function approve(IERC20 _token) external;
