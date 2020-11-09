@@ -3,6 +3,29 @@
   "version": "1.0.0",
   "main": "index.js",
   "license": "MIT",
+  "description": "Value Vaults Contracts and ABI",
+  "scripts": {
+    "compile": "truffle compile",
+    "testrpc": "ganache-cli --deterministic --gasLimit 10000000",
+    "test": "truffle test",
+    "test:verbose": "VERBOSE=true truffle test",
+    "coverage": "yarn solidity-coverage",
+    "lint": "eslint .",
+    "lint:contracts": "solhint contracts/*.sol",
+    "flat:contracts": "sol-merger \"./contracts/*.sol\" ./build",
+    "flat:contracts-vaults": "sol-merger \"./contracts/vaults/*.sol\" ./build/vaults",
+    "flat:contracts-vaults-misc": "sol-merger \"./contracts/vaults/misc/*.sol\" ./build/vaults/misc",
+    "flat:contracts-vaults-mock": "sol-merger \"./contracts/vaults/mock/*.sol\" ./build/vaults/mock",
+    "flat:contracts-vaults-strategies": "sol-merger \"./contracts/vaults/v2/strategies/*.sol\" ./build/vaults/v2/strategies"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/valuedefi/vaults.git"
+  },
+  "bugs": {
+    "url": "https://github.com/valuedefi/vaults/issues"
+  },
+  "homepage": "https://github.com/valuedefi/vaults#readme",
   "dependencies": {
     "@openzeppelin/contracts": "^3.1.0",
     "@openzeppelin/test-helpers": "^0.5.6",
