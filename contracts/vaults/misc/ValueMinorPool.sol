@@ -76,6 +76,8 @@ contract ValueMinorPool is Ownable {
     // Reward multipler
     uint256[4] public epochRewardMultiplers = [500, 0, 0, 0];
 
+    bool private _mutex;
+
     event Deposit(address indexed user, uint256 indexed pid, uint256 amount);
     event Withdraw(address indexed user, uint256 indexed pid, uint256 amount);
     event EmergencyWithdraw(address indexed user, uint256 indexed pid, uint256 amount);
@@ -94,13 +96,33 @@ contract ValueMinorPool is Ownable {
         vaultMaster = _vaultMaster;
     }
 
+    modifier _non_reentrant_() {
+        require(!_mutex, "reentry");
+        _mutex = true;
+        _;
+        _mutex = false;
+    }
+
+    modifier validPool(uint256 _pid) {
+        require(_pid < poolInfo.length, "pool exists?");
+        _;
+    }
+
     function poolLength() external view returns (uint256) {
         return poolInfo.length;
+    }
+
+    function checkPoolDuplicate(IERC20 _lpToken) internal {
+        uint256 length = poolInfo.length;
+        for (uint256 pid = 0; pid < length; ++pid) {
+            require(poolInfo[pid].lpToken != _lpToken, "add: existing pool?");
+        }
     }
 
     // Add a new lp to the pool. Can only be called by the owner.
     // XXX DO NOT add the same LP token more than once. Rewards will be messed up if you do.
     function add(uint256 _allocPoint, IERC20 _lpToken, bool _withUpdate, uint256 _lastRewardBlock) public onlyOwner {
+        checkPoolDuplicate(_lpToken);
         if (_withUpdate) {
             massUpdatePools();
         }
@@ -133,10 +155,8 @@ contract ValueMinorPool is Ownable {
     }
 
     // Update the given pool's VALUE allocation point. Can only be called by the owner.
-    function set(uint256 _pid, uint256 _allocPoint, bool _withUpdate) public onlyOwner {
-        if (_withUpdate) {
-            massUpdatePools();
-        }
+    function set(uint256 _pid, uint256 _allocPoint) public validPool onlyOwner {
+        massUpdatePools();
         PoolInfo storage pool = poolInfo[_pid];
         if (pool.isStarted) {
             totalAllocPoint = totalAllocPoint.sub(pool.allocPoint).add(_allocPoint);
@@ -213,7 +233,7 @@ contract ValueMinorPool is Ownable {
     }
 
     // Update reward variables of the given pool to be up-to-date.
-    function updatePool(uint256 _pid) public discountCHI {
+    function updatePool(uint256 _pid) public validPool discountCHI {
         PoolInfo storage pool = poolInfo[_pid];
         if (block.number <= pool.lastRewardBlock) {
             return;
@@ -241,7 +261,7 @@ contract ValueMinorPool is Ownable {
         depositOnBehalf(msg.sender, _pid, _amount, _referrer);
     }
 
-    function depositOnBehalf(address farmer, uint256 _pid, uint256 _amount, address _referrer) public {
+    function depositOnBehalf(address farmer, uint256 _pid, uint256 _amount, address _referrer) public validPool _non_reentrant_ {
         require(msg.sender == farmer || msg.sender == vaultMaster.bank(), "!bank && !yourself");
         PoolInfo storage pool = poolInfo[_pid];
         UserInfo storage user = userInfo[_pid][farmer];
@@ -280,7 +300,7 @@ contract ValueMinorPool is Ownable {
         withdrawOnBehalf(msg.sender, _pid, _amount);
     }
 
-    function withdrawOnBehalf(address farmer, uint256 _pid, uint256 _amount) public {
+    function withdrawOnBehalf(address farmer, uint256 _pid, uint256 _amount) public validPool _non_reentrant_ {
         require(msg.sender == farmer || msg.sender == vaultMaster.bank(), "!bank && !yourself");
         PoolInfo storage pool = poolInfo[_pid];
         UserInfo storage user = userInfo[_pid][farmer];
@@ -311,7 +331,7 @@ contract ValueMinorPool is Ownable {
     }
 
     // Withdraw without caring about rewards. EMERGENCY ONLY.
-    function emergencyWithdraw(uint256 _pid) public {
+    function emergencyWithdraw(uint256 _pid) public validPool _non_reentrant_ {
         PoolInfo storage pool = poolInfo[_pid];
         UserInfo storage user = userInfo[_pid][msg.sender];
         pool.lpToken.safeTransfer(address(msg.sender), user.amount);

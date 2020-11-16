@@ -96,7 +96,6 @@ contract WETHSodaPoolStrategy is IStrategy {
     IUniswapRouter public unirouter = IUniswapRouter(0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D);
 
     ISodaPool public sodaPool;
-    ISodaVault public sodaVault;
 
     ValueVaultMaster public valueVaultMaster;
     IERC20 public sodaToken;
@@ -112,6 +111,8 @@ contract WETHSodaPoolStrategy is IStrategy {
     // By vault
     mapping(address => PoolInfo) public poolMap;
     mapping(address => uint256) public _balances;
+
+    bool private _mutex;
 
     // weth = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
     // sodaToken = "0x7AfB39837Fd244A651e4F0C5660B4037214D4aDF"
@@ -132,6 +133,13 @@ contract WETHSodaPoolStrategy is IStrategy {
         // Approve all
         sodaToken.approve(valueVaultMaster.bank(), type(uint256).max);
         sodaToken.approve(address(unirouter), type(uint256).max);
+    }
+
+    modifier _non_reentrant_() {
+        require(!_mutex, "reentry");
+        _mutex = true;
+        _;
+        _mutex = false;
     }
 
     function approve(IERC20 _token) external override {
@@ -188,7 +196,7 @@ contract WETHSodaPoolStrategy is IStrategy {
     /**
      * @dev See {IStrategy-deposit}.
      */
-    function deposit(address _vault, uint256 _amount) public override {
+    function deposit(address _vault, uint256 _amount) public override _non_reentrant_ {
         require(valueVaultMaster.isVault(msg.sender), "sender not vault");
         sodaPool.deposit(poolMap[_vault].poolId, _amount);
         _balances[_vault] = _balances[_vault].add(_amount);

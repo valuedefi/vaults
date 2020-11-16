@@ -41,8 +41,17 @@ interface IUniswapRouter {
     ) external returns (uint amountA, uint amountB, uint liquidity);
 }
 
+interface IValueLiquidPool {
+    function swapExactAmountIn(address, uint, address, uint, uint) external returns (uint, uint);
+    function swapExactAmountOut(address, uint, address, uint, uint) external returns (uint, uint);
+    function calcInGivenOut(uint, uint, uint, uint, uint, uint) external pure returns (uint);
+    function calcOutGivenIn(uint, uint, uint, uint, uint, uint) external pure returns (uint);
+    function getDenormalizedWeight(address) external view returns (uint);
+    function getBalance(address) external view returns (uint);
+    function swapFee() external view returns (uint);
+}
+
 interface IStakingRewards {
-    // Views
     function lastTimeRewardApplicable() external view returns (uint256);
     function rewardPerToken() external view returns (uint256);
     function rewardRate() external view returns (uint256);
@@ -51,11 +60,17 @@ interface IStakingRewards {
     function totalSupply() external view returns (uint256);
     function balanceOf(address account) external view returns (uint256);
 
-    // Mutative
     function stake(uint256 amount) external;
     function withdraw(uint256 amount) external;
     function getReward() external;
     function exit() external;
+}
+
+interface ISushiPool {
+    function deposit(uint256 _poolId, uint256 _amount) external;
+    function claim(uint256 _poolId) external;
+    function withdraw(uint256 _poolId, uint256 _amount) external;
+    function emergencyWithdraw(uint256 _poolId) external;
 }
 
 interface IProfitSharer {
@@ -66,11 +81,12 @@ interface IValueVaultBank {
     function make_profit(uint256 _poolId, uint256 _amount) external;
 }
 
-    // Deposit UNIv2ETHWBTC to a standard StakingRewards pool (eg. UNI Pool - https://app.uniswap.org/#/uni)
+// Deposit UNIv2ETHWBTC to a standard StakingRewards pool (eg. UNI Pool - https://app.uniswap.org/#/uni)
 // Wait for Vault commands: deposit, withdraw, claim, harvest (can be called by public via Vault)
 contract Univ2ETHWBTCMultiPoolStrategy is IStrategyV2 {
     using SafeMath for uint256;
 
+    address public strategist;
     address public governance;
 
     uint256 public constant FEE_DENOMINATOR = 10000;
@@ -85,19 +101,24 @@ contract Univ2ETHWBTCMultiPoolStrategy is IStrategyV2 {
     IERC20 public lpPairTokenB; // For this contract it will be always be WETH
 
     mapping(address => mapping(address => address[])) public uniswapPaths; // [input -> output] => uniswap_path
+    mapping(address => mapping(address => address)) public liquidPools; // [input -> output] => value_liquid_pool (valueliquid.io)
 
     struct PoolInfo {
         address vault;
         IERC20 targetToken;
-        IStakingRewards targetPool;
+        address targetPool;
+        uint256 targetPoolId; // poolId in soda/chicken pool (no use for IStakingRewards pool eg. golff.finance)
         uint256 minHarvestForTakeProfit;
+        uint8 poolType; // 0: IStakingRewards, 1: ISushiPool, 2: ISodaPool
         uint256 poolQuota; // set 0 to disable quota (no limit)
+        uint256 balance;
     }
 
     mapping(uint256 => PoolInfo) public poolMap; // poolIndex -> poolInfo
-    address public totalBalance;
 
     bool public aggressiveMode; // will try to stake all lpPair tokens available (be forwarded from bank or from another strategies)
+
+    uint8[] public poolPreferredIds; // sorted by preference
 
     // lpPair: ETHWBTC_UNIv2 = 0xbb2b8038a1640196fbe3e38816f3e67cba72d940
     // lpPairTokenA: WBTC = 0x2260fac5e5542a773aa44fbcfedf7c193bc2c599
@@ -113,20 +134,24 @@ contract Univ2ETHWBTCMultiPoolStrategy is IStrategyV2 {
         lpPairTokenB = _lpPairTokenB;
         aggressiveMode = _aggressiveMode;
         governance = tx.origin;
+        strategist = tx.origin;
         // Approve all
-        lpPair.approve(valueVaultMaster.bank(), type(uint256).max);
         lpPairTokenA.approve(address(unirouter), type(uint256).max);
         lpPairTokenB.approve(address(unirouter), type(uint256).max);
     }
 
     // targetToken: uniToken = 0x1f9840a85d5af5bf1d1762f925bdaddc4201f984
     // targetPool: ETHWBTCUniPool = 0xCA35e32e7926b96A9988f61d510E038108d8068e
-    function setPoolInfo(uint256 _poolId, address _vault, IERC20 _targetToken, IStakingRewards _targetPool, uint256 _minHarvestForTakeProfit, uint256 _poolQuota) external {
+    // targetToken: draculaToken = 0xb78B3320493a4EFaa1028130C5Ba26f0B6085Ef8
+    // targetPool: MasterVampire[32] = 0xD12d68Fd52b54908547ebC2Cd77Ec6EbbEfd3099
+    function setPoolInfo(uint256 _poolId, address _vault, IERC20 _targetToken, address _targetPool, uint256 _targetPoolId, uint256 _minHarvestForTakeProfit, uint8 _poolType, uint256 _poolQuota) external {
         require(msg.sender == governance, "!governance");
         poolMap[_poolId].vault = _vault;
         poolMap[_poolId].targetToken = _targetToken;
         poolMap[_poolId].targetPool = _targetPool;
+        poolMap[_poolId].targetPoolId = _targetPoolId;
         poolMap[_poolId].minHarvestForTakeProfit = _minHarvestForTakeProfit;
+        poolMap[_poolId].poolType = _poolType;
         poolMap[_poolId].poolQuota = _poolQuota;
         _targetToken.approve(address(unirouter), type(uint256).max);
         lpPair.approve(_vault, type(uint256).max);
@@ -149,33 +174,57 @@ contract Univ2ETHWBTCMultiPoolStrategy is IStrategyV2 {
         governance = _governance;
     }
 
+    function setStrategist(address _strategist) external {
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
+        strategist = _strategist;
+    }
+
+    function setPoolPreferredIds(uint8[] memory _poolPreferredIds) public {
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
+        delete poolPreferredIds;
+        for (uint8 i = 0; i < _poolPreferredIds.length; ++i) {
+            poolPreferredIds.push(_poolPreferredIds[i]);
+        }
+    }
+
     function setMinHarvestForTakeProfit(uint256 _poolId, uint256 _minHarvestForTakeProfit) external {
-        require(msg.sender == governance, "!governance");
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
         poolMap[_poolId].minHarvestForTakeProfit = _minHarvestForTakeProfit;
     }
 
     function setPoolQuota(uint256 _poolId, uint256 _poolQuota) external {
-        require(msg.sender == governance, "!governance");
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
         poolMap[_poolId].poolQuota = _poolQuota;
     }
 
+    // Sometime the balance could be slightly changed (due to the pool, or because we call xxxByGov methods)
+    function setPoolBalance(uint256 _poolId, uint256 _balance) external {
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
+        poolMap[_poolId].balance = _balance;
+    }
+
+    function setTotalBalance(uint256 _totalBalance) external {
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
+        totalBalance = _totalBalance;
+    }
+
     function setAggressiveMode(bool _aggressiveMode) external {
-        require(msg.sender == governance, "!governance");
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
         aggressiveMode = _aggressiveMode;
     }
 
     function setWETH(IERC20 _weth) external {
-        require(msg.sender == governance, "!governance");
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
         weth = _weth;
     }
 
     function setOnesplit(IOneSplit _onesplit) external {
-        require(msg.sender == governance, "!governance");
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
         onesplit = _onesplit;
     }
 
     function setUnirouter(IUniswapRouter _unirouter) external {
-        require(msg.sender == governance, "!governance");
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
         unirouter = _unirouter;
         lpPairTokenA.approve(address(unirouter), type(uint256).max);
         lpPairTokenB.approve(address(unirouter), type(uint256).max);
@@ -185,11 +234,18 @@ contract Univ2ETHWBTCMultiPoolStrategy is IStrategyV2 {
      * @dev See {IStrategyV2-deposit}.
      */
     function deposit(uint256 _poolId, uint256 _amount) public override {
-        require(poolMap[_poolId].vault == msg.sender, "sender not vault");
+        PoolInfo storage pool = poolMap[_poolId];
+        require(pool.vault == msg.sender, "sender not vault");
         if (aggressiveMode) {
             _amount = lpPair.balanceOf(address(this));
         }
-        poolMap[_poolId].targetPool.stake(_amount);
+        if (pool.poolType == 0) {
+            IStakingRewards(pool.targetPool).stake(_amount);
+        } else {
+            ISushiPool(pool.targetPool).deposit(pool.targetPoolId, _amount);
+        }
+        pool.balance = pool.balance.add(_amount);
+        totalBalance = totalBalance.add(_amount);
     }
 
     /**
@@ -197,30 +253,71 @@ contract Univ2ETHWBTCMultiPoolStrategy is IStrategyV2 {
      */
     function claim(uint256 _poolId) external override {
         require(poolMap[_poolId].vault == msg.sender, "sender not vault");
-        poolMap[_poolId].targetPool.getReward();
+        _claim(_poolId);
+
+    }
+
+    function _claim(uint256 _poolId) internal {
+        PoolInfo storage pool = poolMap[_poolId];
+        if (pool.poolType == 0) {
+            IStakingRewards(pool.targetPool).getReward();
+        } else if (pool.poolType == 1) {
+            ISushiPool(pool.targetPool).deposit(pool.targetPoolId, 0);
+        } else {
+            ISushiPool(pool.targetPool).claim(pool.targetPoolId);
+        }
     }
 
     /**
      * @dev See {IStrategyV2-withdraw}.
      */
     function withdraw(uint256 _poolId, uint256 _amount) external override {
-        require(poolMap[_poolId].vault == msg.sender, "sender not vault");
-        poolMap[_poolId].targetPool.withdraw(_amount);
+        PoolInfo storage pool = poolMap[_poolId];
+        require(pool.vault == msg.sender, "sender not vault");
+        if (pool.poolType == 0) {
+            IStakingRewards(pool.targetPool).withdraw(_amount);
+        } else {
+            ISushiPool(pool.targetPool).withdraw(pool.targetPoolId, _amount);
+        }
+        if (pool.balance < _amount) {
+            _amount = pool.balance;
+        }
+        pool.balance = pool.balance - _amount;
+        if (totalBalance >= _amount) totalBalance = totalBalance - _amount;
     }
 
-    function depositByGov(IStakingRewards pool, uint256 _amount) external {
-        require(msg.sender == governance, "!governance");
-        pool.stake(_amount);
+    function depositByGov(address pool, uint8 _poolType, uint256 _targetPoolId, uint256 _amount) external {
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
+        if (_poolType == 0) {
+            IStakingRewards(pool).stake(_amount);
+        } else {
+            ISushiPool(pool).deposit(_targetPoolId, _amount);
+        }
     }
 
-    function claimByGov(IStakingRewards pool) external {
-        require(msg.sender == governance, "!governance");
-        pool.getReward();
+    function claimByGov(address pool, uint8 _poolType, uint256 _targetPoolId) external {
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
+        if (_poolType == 0) {
+            IStakingRewards(pool).getReward();
+        } else if (_poolType == 1) {
+            ISushiPool(pool).deposit(_targetPoolId, 0);
+        } else {
+            ISushiPool(pool).claim(_targetPoolId);
+        }
     }
 
-    function withdrawByGov(IStakingRewards pool, uint256 _amount) external {
-        require(msg.sender == governance, "!governance");
-        pool.withdraw(_amount);
+    function withdrawByGov(address pool, uint8 _poolType, uint256 _targetPoolId, uint256 _amount) external {
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
+        if (_poolType == 0) {
+            IStakingRewards(pool).withdraw(_amount);
+        } else {
+            ISushiPool(pool).withdraw(_targetPoolId, _amount);
+        }
+    }
+
+    function emergencyWithdrawByGov(address pool, uint256 _targetPoolId) external {
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
+        ISushiPool(pool).emergencyWithdraw(_targetPoolId);
     }
 
     /**
@@ -240,20 +337,32 @@ contract Univ2ETHWBTCMultiPoolStrategy is IStrategyV2 {
     }
 
     function setUnirouterPath(address _input, address _output, address [] memory _path) public {
-        require(msg.sender == governance, "!governance");
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
         uniswapPaths[_input][_output] = _path;
     }
 
+    function setLiquidPool(address _input, address _output, address _pool) public {
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
+        liquidPools[_input][_output] = _pool;
+        IERC20(_input).approve(_pool, type(uint256).max);
+    }
+
     function _swapTokens(address _input, address _output, uint256 _amount) internal {
-        address[] memory path = uniswapPaths[_input][_output];
-        if (path.length == 0) {
-            // path: _input -> _output
-            path = new address[](2);
-            path[0] = _input;
-            path[1] = _output;
+        address _pool = liquidPools[_input][_output];
+        if (_pool != address(0)) { // use ValueLiquid
+            // swapExactAmountIn(tokenIn, tokenAmountIn, tokenOut, minAmountOut, maxPrice)
+            IValueLiquidPool(_pool).swapExactAmountIn(_input, _amount, _output, 1, type(uint256).max);
+        } else { // use Uniswap
+            address[] memory path = uniswapPaths[_input][_output];
+            if (path.length == 0) {
+                // path: _input -> _output
+                path = new address[](2);
+                path[0] = _input;
+                path[1] = _output;
+            }
+            // swapExactTokensForTokens(amountIn, amountOutMin, path, to, deadline)
+            unirouter.swapExactTokensForTokens(_amount, 1, path, address(this), now.add(1800));
         }
-        // swapExactTokensForTokens(amountIn, amountOutMin, path, to, deadline)
-        unirouter.swapExactTokensForTokens(_amount, 1, path, address(this), now.add(1800));
     }
 
     function _addLiquidity() internal {
@@ -269,11 +378,13 @@ contract Univ2ETHWBTCMultiPoolStrategy is IStrategyV2 {
         address _vault = msg.sender;
         require(valueVaultMaster.isVault(_vault), "!vault"); // additional protection so we don't burn the funds
 
-        poolMap[_poolId].targetPool.getReward();
-        IERC20 targetToken = poolMap[_poolId].targetToken;
+        PoolInfo storage pool = poolMap[_poolId];
+        _claim(_poolId);
+
+        IERC20 targetToken = pool.targetToken;
         uint256 targetTokenBal = targetToken.balanceOf(address(this));
 
-        if (targetTokenBal < poolMap[_poolId].minHarvestForTakeProfit) return;
+        if (targetTokenBal < pool.minHarvestForTakeProfit) return;
 
         _swapTokens(address(targetToken), address(weth), targetTokenBal);
         uint256 wethBal = weth.balanceOf(address(this));
@@ -300,22 +411,24 @@ contract Univ2ETHWBTCMultiPoolStrategy is IStrategyV2 {
 
             wethBal = weth.balanceOf(address(this));
 
-            address profitSharer = valueVaultMaster.profitSharer();
-            address performanceReward = valueVaultMaster.performanceReward();
+            {
+                address profitSharer = valueVaultMaster.profitSharer();
+                address performanceReward = valueVaultMaster.performanceReward();
 
-            if (_gasFee > 0 && performanceReward != address(0)) {
-                if (_gasFee.add(_govVaultProfitShareFee) < wethBal) {
-                    _gasFee = wethBal.sub(_govVaultProfitShareFee);
+                if (_gasFee > 0 && performanceReward != address(0)) {
+                    if (_gasFee.add(_govVaultProfitShareFee) < wethBal) {
+                        _gasFee = wethBal.sub(_govVaultProfitShareFee);
+                    }
+                    weth.transfer(performanceReward, _gasFee);
+                    wethBal = weth.balanceOf(address(this));
                 }
-                weth.transfer(performanceReward, _gasFee);
-                wethBal = weth.balanceOf(address(this));
-            }
 
-            if (_govVaultProfitShareFee > 0 && profitSharer != address(0)) {
-                address yfv = valueVaultMaster.yfv();
-                _swapTokens(address(weth), yfv, wethBal);
-                IERC20(yfv).transfer(profitSharer, IERC20(yfv).balanceOf(address(this)));
-                IProfitSharer(profitSharer).shareProfit();
+                if (_govVaultProfitShareFee > 0 && profitSharer != address(0)) {
+                    address govToken = valueVaultMaster.govToken();
+                    _swapTokens(address(weth), govToken, wethBal);
+                    IERC20(govToken).transfer(profitSharer, IERC20(govToken).balanceOf(address(this)));
+                    IProfitSharer(profitSharer).shareProfit();
+                }
             }
 
             uint256 balanceLeft = lpPair.balanceOf(address(this));
@@ -349,24 +462,19 @@ contract Univ2ETHWBTCMultiPoolStrategy is IStrategyV2 {
     }
 
     function balanceOf(uint256 _poolId) public override view returns (uint256) {
-        return poolMap[_poolId].targetPool.balanceOf(address(this));
+        return poolMap[_poolId].balance;
     }
 
+    // Only support IStakingRewards pool
     function pendingReward(uint256 _poolId) public override view returns (uint256) {
-        return poolMap[_poolId].targetPool.earned(address(this));
+        if (poolMap[_poolId].poolType != 0) return 0; // do not support other pool types
+        return IStakingRewards(poolMap[_poolId].targetPool).earned(address(this));
     }
 
     // Helper function, Should never use it on-chain.
     // Return 1e18x of APY. _lpPairUsdcPrice = current lpPair price (1-wei in WBTC-wei) multiple by 1e18
-    function expectedAPY(uint256 _poolId, uint256 _lpPairUsdcPrice) public override view returns (uint256) {
-        if (poolMap[_poolId].targetPool.totalSupply() == 0) return 0;
-        uint256 investAmt = balanceOf(_poolId);
-        uint256 oneHourReward = poolMap[_poolId].targetPool.rewardRate().mul(3600);
-        uint256 returnAmt = oneHourReward.mul(investAmt).div(poolMap[_poolId].targetPool.totalSupply());
-        IERC20 usdc = IERC20(valueVaultMaster.usdc());
-        uint256 investInUSDC = investAmt.mul(_lpPairUsdcPrice);
-        (uint256 returnInUSDC, ) = onesplit.getExpectedReturn(poolMap[_poolId].targetToken, usdc, returnAmt, 10, 0);
-        return returnInUSDC.mul(8760).div(investInUSDC); // 1e16 -> 1%
+    function expectedAPY(uint256, uint256) public override view returns (uint256) {
+        return 0; // not implemented
     }
 
     /**

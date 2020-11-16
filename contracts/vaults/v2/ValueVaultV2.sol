@@ -21,8 +21,6 @@ contract ValueVaultV2 is IValueVault, ERC20 {
 
     address public governance;
 
-    mapping (address => uint256) public lockedAmount;
-
     IStrategyV2 public strategy;
 
     uint256[] public poolStrategyIds; // sorted by preference

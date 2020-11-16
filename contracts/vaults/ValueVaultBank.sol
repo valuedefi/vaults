@@ -43,7 +43,7 @@ contract ValueVaultBank {
         uint256 gasStart = gasleft();
         _;
         uint256 gasSpent = 21000 + gasStart - gasleft() + 16 * msg.data.length;
-//        chi.freeFromUpTo(msg.sender, (gasSpent + 14154) / 41130);
+        chi.freeFromUpTo(msg.sender, (gasSpent + 14154) / 41130);
     }
 
     address public governance;
@@ -81,12 +81,21 @@ contract ValueVaultBank {
     mapping(uint256 => mapping(address => uint256)) public lastStakeTimes; // poolId -> user's last staked
     uint256 constant internal magnitude = 10 ** 40;
 
+    bool private _mutex;
+
     event Deposit(address indexed user, uint256 indexed poolId, uint256 amount);
     event Withdraw(address indexed user, uint256 indexed poolId, uint256 amount);
     event Claim(address indexed user, uint256 indexed poolId);
 
     constructor() public {
         governance = tx.origin;
+    }
+
+    modifier _non_reentrant_() {
+        require(!_mutex, "reentry");
+        _mutex = true;
+        _;
+        _mutex = false;
     }
 
     function setGovernance(address _governance) external {
@@ -126,10 +135,14 @@ contract ValueVaultBank {
         require(now >= pool.startTime, "deposit: after startTime");
         require(_amount > 0, "!_amount");
         require(address(pool.vault) != address(0), "pool.vault = 0");
+        require(pool.vault.strategy.getLpToken() == pool.token, "!pool.token");
         require(pool.individualCap == 0 || stakers[_poolId][msg.sender].stake.add(_amount) <= pool.individualCap, "Exceed pool.individualCap");
         require(pool.totalCap == 0 || global[_poolId].total_stake.add(_amount) <= pool.totalCap, "Exceed pool.totalCap");
 
+        uint _before = pool.token.balanceOf(address(pool.vault));
         pool.token.safeTransferFrom(msg.sender, address(pool.vault), _amount);
+        uint _after = pool.token.balanceOf(address(pool.vault));
+        _amount = _after.sub(_before); // Additional check for deflationary tokens
         pool.vault.mintByBank(pool.token, msg.sender, _amount);
         if (_farmMinorPool && address(vaultMaster) != address(0)) {
             address minorPool = vaultMaster.minorPool();
@@ -188,7 +201,7 @@ contract ValueVaultBank {
     }
 
     // Withdraw without caring about rewards. EMERGENCY ONLY.
-    function emergencyWithdraw(uint256 _poolId) public {
+    function emergencyWithdraw(uint256 _poolId) public _non_reentrant_ {
         uint256 amount = stakers[_poolId][msg.sender].stake;
         poolMap[_poolId].token.safeTransfer(address(msg.sender), amount);
         stakers[_poolId][msg.sender].stake = 0;
@@ -203,7 +216,7 @@ contract ValueVaultBank {
         poolMap[_poolId].vault.harvestStrategy(_strategy, _poolId);
     }
 
-    function make_profit(uint256 _poolId, uint256 _amount) public {
+    function make_profit(uint256 _poolId, uint256 _amount) public _non_reentrant_ {
         require(_amount > 0, "not 0");
         PoolInfo storage pool = poolMap[_poolId];
         pool.token.safeTransferFrom(msg.sender, address(this), _amount);

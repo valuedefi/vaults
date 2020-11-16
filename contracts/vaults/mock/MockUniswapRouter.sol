@@ -15,6 +15,14 @@ interface IUniswapRouter {
         uint256 deadline
     ) external returns (uint256[] memory amounts);
 
+    function swapExactTokensForTokensSupportingFeeOnTransferTokens(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external returns (uint256[] memory amounts);
+
     function addLiquidity(
         address tokenA,
         address tokenB,
@@ -39,11 +47,36 @@ contract MockUniswapRouter is IUniswapRouter {
 
     function swapExactTokensForTokens(
         uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) public override returns (uint256[] memory amounts) {
+        return _swap(amountIn, amountOutMin, path, to, deadline);
+    }
+
+//    address public msg_sender;
+//    address public contract_address;
+
+    function swapExactTokensForTokensSupportingFeeOnTransferTokens(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
+    ) external override returns (uint256[] memory amounts) {
+//        msg_sender = msg.sender;
+//        contract_address = address(this);
+        return _swap(amountIn, amountOutMin, path, to, deadline);
+    }
+
+    function _swap(
+        uint256 amountIn,
         uint256,
         address[] calldata path,
         address to,
         uint256
-    ) external override returns (uint256[] memory amounts) {
+    ) internal returns (uint256[] memory amounts) {
         uint256 amountOut = amountIn.mul(1); // assume 1 INPUT -> 1 OUTPUT
         IERC20 inputToken = IERC20(path[0]);
         IERC20 outputToken = IERC20(path[path.length - 1]);

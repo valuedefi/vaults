@@ -416,7 +416,7 @@ contract YFVGovernanceVault {
     constructor (address _stakeToken, uint256 _earnLowerlimit) public {
         stakeToken = IERC20(_stakeToken);
         getName = string(abi.encodePacked("yfv:GovVault:", IERC20(_stakeToken).name()));
-        earnLowerlimit = _earnLowerlimit * 1e18;
+        earnLowerlimit = _earnLowerlimit;
         governance = tx.origin;
         whitelistedPools[0x62a9fE913eb596C8faC0936fd2F51064022ba22e] = true; // BAL Pool
         whitelistedPools[0x70b83A7f5E83B3698d136887253E0bf426C9A117] = true; // YFI Pool

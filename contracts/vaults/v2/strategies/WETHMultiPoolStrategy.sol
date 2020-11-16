@@ -74,6 +74,27 @@ interface IUniswapRouter {
         address to,
         uint256 deadline
     ) external returns (uint256[] memory amounts);
+
+    function addLiquidity(
+        address tokenA,
+        address tokenB,
+        uint amountADesired,
+        uint amountBDesired,
+        uint amountAMin,
+        uint amountBMin,
+        address to,
+        uint deadline
+    ) external returns (uint amountA, uint amountB, uint liquidity);
+}
+
+interface IValueLiquidPool {
+    function swapExactAmountIn(address, uint, address, uint, uint) external returns (uint, uint);
+    function swapExactAmountOut(address, uint, address, uint, uint) external returns (uint, uint);
+    function calcInGivenOut(uint, uint, uint, uint, uint, uint) external pure returns (uint);
+    function calcOutGivenIn(uint, uint, uint, uint, uint, uint) external pure returns (uint);
+    function getDenormalizedWeight(address) external view returns (uint);
+    function getBalance(address) external view returns (uint);
+    function swapFee() external view returns (uint);
 }
 
 interface IStakingRewards {
@@ -87,21 +108,22 @@ interface IStakingRewards {
     function balanceOf(address account) external view returns (uint256);
 
     // Mutative
-    function stake(uint256 amount) external;
+    function stake(uint256 amount) external; // Goff, DokiDoki
+    function stake(uint256 amount, string memory affCode) external; // dego.finance
     function withdraw(uint256 amount) external;
     function getReward() external;
     function exit() external;
+
+    // DokiDoki
+    function getRewardsAmount(address account) external view returns(uint256);
+    function claim(uint amount) external;
 }
 
 interface ISushiPool {
     function deposit(uint256 _poolId, uint256 _amount) external;
-    function withdraw(uint256 _poolId, uint256 _amount) external;
-}
-
-interface ISodaPool {
-    function deposit(uint256 _poolId, uint256 _amount) external;
     function claim(uint256 _poolId) external;
     function withdraw(uint256 _poolId, uint256 _amount) external;
+    function emergencyWithdraw(uint256 _poolId) external;
 }
 
 interface IProfitSharer {
@@ -118,8 +140,8 @@ interface IValueVaultBank {
 contract WETHMultiPoolStrategy is IStrategyV2p1 {
     using SafeMath for uint256;
 
-    address public governance; // will be a Timelock contract
-    address public operator; // can be EOA for non-fund transferring operation
+    address public strategist;
+    address public governance;
 
     uint256 public constant FEE_DENOMINATOR = 10000;
 
@@ -130,6 +152,7 @@ contract WETHMultiPoolStrategy is IStrategyV2p1 {
     IERC20 public lpToken; // WETH
 
     mapping(address => mapping(address => address[])) public uniswapPaths; // [input -> output] => uniswap_path
+    mapping(address => mapping(address => address)) public liquidPools; // [input -> output] => value_liquid_pool (valueliquid.io)
 
     struct PoolInfo {
         address vault;
@@ -137,13 +160,12 @@ contract WETHMultiPoolStrategy is IStrategyV2p1 {
         address targetPool;
         uint256 targetPoolId; // poolId in soda/chicken pool (no use for IStakingRewards pool eg. golff.finance)
         uint256 minHarvestForTakeProfit;
-        uint8 poolType; // 0: IStakingRewards, 1: ISushiPool, 2: ISodaPool
+        uint8 poolType; // 0: IStakingRewards, 1: ISushiPool, 2: ISodaPool, 3: Dego.Finance, 4: DokiDoki.Finance
         uint256 poolQuota; // set 0 to disable quota (no limit)
         uint256 balance;
     }
 
     mapping(uint256 => PoolInfo) public poolMap; // poolIndex -> poolInfo
-    uint256 public totalBalance;
 
     bool public aggressiveMode; // will try to stake all lpTokens available (be forwarded from bank or from another strategies)
 
@@ -157,16 +179,18 @@ contract WETHMultiPoolStrategy is IStrategyV2p1 {
         lpToken = _lpToken;
         aggressiveMode = _aggressiveMode;
         governance = tx.origin;
-        operator = msg.sender;
+        strategist = tx.origin;
         // Approve all
         lpToken.approve(valueVaultMaster.bank(), type(uint256).max);
         lpToken.approve(address(unirouter), type(uint256).max);
     }
 
-    // targetToken: golffToken = 0x488e0369f9bc5c40c002ea7c1fe4fd01a198801c
-    // targetPool: GOFETHPool = 0xC46188A5a7c1dFB04a99903544660EA83f986FB8
+    // [0] targetToken: kfcToken = 0xE63684BcF2987892CEfB4caA79BD21b34e98A291
+    //     targetPool:  kfcPool  = 0x87AE4928f6582376a0489E9f70750334BBC2eb35
+    // [1] targetToken: degoToken = 0x88EF27e69108B2633F8E1C184CC37940A075cC02
+    //     targetPool:  degoPool  = 0x28681d373aF03A0Eb00ACE262c5dad9A0C65F276
     function setPoolInfo(uint256 _poolId, address _vault, IERC20 _targetToken, address _targetPool, uint256 _targetPoolId, uint256 _minHarvestForTakeProfit, uint8 _poolType, uint256 _poolQuota) external {
-        require(msg.sender == governance || msg.sender == operator, "!governance && !operator");
+        require(msg.sender == governance, "!governance");
         poolMap[_poolId].vault = _vault;
         poolMap[_poolId].targetToken = _targetToken;
         poolMap[_poolId].targetPool = _targetPool;
@@ -180,13 +204,13 @@ contract WETHMultiPoolStrategy is IStrategyV2p1 {
     }
 
     function approve(IERC20 _token) external override {
-        require(msg.sender == governance || msg.sender == operator, "!governance && !operator");
+        require(msg.sender == governance, "!governance");
         _token.approve(valueVaultMaster.bank(), type(uint256).max);
         _token.approve(address(unirouter), type(uint256).max);
     }
 
     function approveForSpender(IERC20 _token, address spender) external override {
-        require(msg.sender == governance || msg.sender == operator, "!governance && !operator");
+        require(msg.sender == governance, "!governance");
         _token.approve(spender, type(uint256).max);
     }
 
@@ -195,13 +219,13 @@ contract WETHMultiPoolStrategy is IStrategyV2p1 {
         governance = _governance;
     }
 
-    function setOperator(address _operator) external {
-        require(msg.sender == governance || msg.sender == operator, "!governance && !operator");
-        operator = _operator;
+    function setStrategist(address _strategist) external {
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
+        strategist = _strategist;
     }
 
     function setPoolPreferredIds(uint8[] memory _poolPreferredIds) public {
-        require(msg.sender == governance || msg.sender == operator, "!governance && !operator");
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
         delete poolPreferredIds;
         for (uint8 i = 0; i < _poolPreferredIds.length; ++i) {
             poolPreferredIds.push(_poolPreferredIds[i]);
@@ -209,38 +233,38 @@ contract WETHMultiPoolStrategy is IStrategyV2p1 {
     }
 
     function setMinHarvestForTakeProfit(uint256 _poolId, uint256 _minHarvestForTakeProfit) external {
-        require(msg.sender == governance || msg.sender == operator, "!governance && !operator");
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
         poolMap[_poolId].minHarvestForTakeProfit = _minHarvestForTakeProfit;
     }
 
     function setPoolQuota(uint256 _poolId, uint256 _poolQuota) external {
-        require(msg.sender == governance || msg.sender == operator, "!governance && !operator");
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
         poolMap[_poolId].poolQuota = _poolQuota;
     }
 
     // Sometime the balance could be slightly changed (due to the pool, or because we call xxxByGov methods)
     function setPoolBalance(uint256 _poolId, uint256 _balance) external {
-        require(msg.sender == governance || msg.sender == operator, "!governance && !operator");
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
         poolMap[_poolId].balance = _balance;
     }
 
     function setTotalBalance(uint256 _totalBalance) external {
-        require(msg.sender == governance || msg.sender == operator, "!governance && !operator");
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
         totalBalance = _totalBalance;
     }
 
     function setAggressiveMode(bool _aggressiveMode) external {
-        require(msg.sender == governance || msg.sender == operator, "!governance && !operator");
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
         aggressiveMode = _aggressiveMode;
     }
 
     function setOnesplit(IOneSplit _onesplit) external {
-        require(msg.sender == governance || msg.sender == operator, "!governance && !operator");
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
         onesplit = _onesplit;
     }
 
     function setUnirouter(IUniswapRouter _unirouter) external {
-        require(msg.sender == governance || msg.sender == operator, "!governance && !operator");
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
         unirouter = _unirouter;
     }
 
@@ -272,15 +296,18 @@ contract WETHMultiPoolStrategy is IStrategyV2p1 {
     }
 
     function _deposit(uint256 _poolId, uint256 _amount) internal {
+        PoolInfo storage pool = poolMap[_poolId];
         if (aggressiveMode) {
             _amount = lpToken.balanceOf(address(this));
         }
-        if (poolMap[_poolId].poolType == 0) {
-            IStakingRewards(poolMap[_poolId].targetPool).stake(_amount);
+        if (pool.poolType == 0 || pool.poolType == 4) {
+            IStakingRewards(pool.targetPool).stake(_amount);
+        } else if (pool.poolType == 3) {
+            IStakingRewards(pool.targetPool).stake(_amount, string("valuedefidev02"));
         } else {
-            ISushiPool(poolMap[_poolId].targetPool).deposit(poolMap[_poolId].targetPoolId, _amount);
+            ISushiPool(pool.targetPool).deposit(pool.targetPoolId, _amount);
         }
-        poolMap[_poolId].balance = poolMap[_poolId].balance.add(_amount);
+        pool.balance = pool.balance.add(_amount);
         totalBalance = totalBalance.add(_amount);
     }
 
@@ -307,12 +334,15 @@ contract WETHMultiPoolStrategy is IStrategyV2p1 {
     }
 
     function _claim(uint256 _poolId) internal {
-        if (poolMap[_poolId].poolType == 0) {
-            IStakingRewards(poolMap[_poolId].targetPool).getReward();
-        } else if (poolMap[_poolId].poolType == 1) {
-            ISushiPool(poolMap[_poolId].targetPool).deposit(poolMap[_poolId].targetPoolId, 0);
+        PoolInfo storage pool = poolMap[_poolId];
+        if (pool.poolType == 0 || pool.poolType == 3) {
+            IStakingRewards(pool.targetPool).getReward();
+        } else if (pool.poolType == 4) {
+            IStakingRewards(pool.targetPool).claim(IStakingRewards(pool.targetPool).getRewardsAmount(address(this)));
+        } else if (pool.poolType == 1) {
+            ISushiPool(pool.targetPool).deposit(pool.targetPoolId, 0);
         } else {
-            ISodaPool(poolMap[_poolId].targetPool).claim(poolMap[_poolId].targetPoolId);
+            ISushiPool(pool.targetPool).claim(pool.targetPoolId);
         }
     }
 
@@ -347,22 +377,25 @@ contract WETHMultiPoolStrategy is IStrategyV2p1 {
     }
 
     function _withdraw(uint256 _poolId, uint256 _amount) internal {
-        if (poolMap[_poolId].poolType == 0) {
-            IStakingRewards(poolMap[_poolId].targetPool).withdraw(_amount);
+        PoolInfo storage pool = poolMap[_poolId];
+        if (pool.poolType == 0 || pool.poolType == 3 || pool.poolType == 4) {
+            IStakingRewards(pool.targetPool).withdraw(_amount);
         } else {
-            ISushiPool(poolMap[_poolId].targetPool).withdraw(poolMap[_poolId].targetPoolId, _amount);
+            ISushiPool(pool.targetPool).withdraw(pool.targetPoolId, _amount);
         }
-        if (poolMap[_poolId].balance < _amount) {
-            _amount = poolMap[_poolId].balance;
+        if (pool.balance < _amount) {
+            _amount = pool.balance;
         }
-        poolMap[_poolId].balance = poolMap[_poolId].balance - _amount;
+        pool.balance = pool.balance - _amount;
         if (totalBalance >= _amount) totalBalance = totalBalance - _amount;
     }
 
     function depositByGov(address pool, uint8 _poolType, uint256 _targetPoolId, uint256 _amount) external {
         require(msg.sender == governance, "!governance");
-        if (_poolType == 0) {
+        if (_poolType == 0 || _poolType == 4) {
             IStakingRewards(pool).stake(_amount);
+        } else if (_poolType == 3) {
+            IStakingRewards(pool).stake(_amount, string("valuedefidev02"));
         } else {
             ISushiPool(pool).deposit(_targetPoolId, _amount);
         }
@@ -370,22 +403,29 @@ contract WETHMultiPoolStrategy is IStrategyV2p1 {
 
     function claimByGov(address pool, uint8 _poolType, uint256 _targetPoolId) external {
         require(msg.sender == governance, "!governance");
-        if (_poolType == 0) {
+        if (_poolType == 0 || _poolType == 3) {
             IStakingRewards(pool).getReward();
+        } else if (_poolType == 4) {
+            IStakingRewards(pool).claim(IStakingRewards(pool).getRewardsAmount(address(this)));
         } else if (_poolType == 1) {
             ISushiPool(pool).deposit(_targetPoolId, 0);
         } else {
-            ISodaPool(pool).claim(_targetPoolId);
+            ISushiPool(pool).claim(_targetPoolId);
         }
     }
 
     function withdrawByGov(address pool, uint8 _poolType, uint256 _targetPoolId, uint256 _amount) external {
         require(msg.sender == governance, "!governance");
-        if (_poolType == 0) {
+        if (_poolType == 0 || _poolType == 3 || _poolType == 4) {
             IStakingRewards(pool).withdraw(_amount);
         } else {
             ISushiPool(pool).withdraw(_targetPoolId, _amount);
         }
+    }
+
+    function emergencyWithdrawByGov(address pool, uint256 _targetPoolId) external {
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
+        ISushiPool(pool).emergencyWithdraw(_targetPoolId);
     }
 
     function switchBetweenPoolsByGov(uint256 _sourcePoolId, uint256 _destPoolId, uint256 _amount) external override {
@@ -405,7 +445,7 @@ contract WETHMultiPoolStrategy is IStrategyV2p1 {
      * @dev See {IStrategyV2-forwardToAnotherStrategy}
      */
     function forwardToAnotherStrategy(address _dest, uint256 _amount) external override returns (uint256 sent) {
-        require(valueVaultMaster.isVault(msg.sender) || msg.sender == governance, "!vault && !governance");
+        require(valueVaultMaster.isVault(msg.sender), "not vault");
         require(valueVaultMaster.isStrategy(_dest), "not strategy");
         require(IStrategyV2p1(_dest).getLpToken() == address(lpToken), "!lpToken");
         uint256 lpTokenBal = lpToken.balanceOf(address(this));
@@ -414,20 +454,32 @@ contract WETHMultiPoolStrategy is IStrategyV2p1 {
     }
 
     function setUnirouterPath(address _input, address _output, address [] memory _path) public {
-        require(msg.sender == governance || msg.sender == operator, "!governance && !operator");
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
         uniswapPaths[_input][_output] = _path;
     }
 
+    function setLiquidPool(address _input, address _output, address _pool) public {
+        require(msg.sender == governance || msg.sender == strategist, "!governance && !strategist");
+        liquidPools[_input][_output] = _pool;
+        IERC20(_input).approve(_pool, type(uint256).max);
+    }
+
     function _swapTokens(address _input, address _output, uint256 _amount) internal {
-        address[] memory path = uniswapPaths[_input][_output];
-        if (path.length == 0) {
-            // path: _input -> _output
-            path = new address[](2);
-            path[0] = _input;
-            path[1] = _output;
+        address _pool = liquidPools[_input][_output];
+        if (_pool != address(0)) { // use ValueLiquid
+            // swapExactAmountIn(tokenIn, tokenAmountIn, tokenOut, minAmountOut, maxPrice)
+            IValueLiquidPool(_pool).swapExactAmountIn(_input, _amount, _output, 1, type(uint256).max);
+        } else { // use Uniswap
+            address[] memory path = uniswapPaths[_input][_output];
+            if (path.length == 0) {
+                // path: _input -> _output
+                path = new address[](2);
+                path[0] = _input;
+                path[1] = _output;
+            }
+            // swapExactTokensForTokens(amountIn, amountOutMin, path, to, deadline)
+            unirouter.swapExactTokensForTokens(_amount, 1, path, address(this), now.add(1800));
         }
-        // swapExactTokensForTokens(amountIn, amountOutMin, path, to, deadline)
-        unirouter.swapExactTokensForTokens(_amount, 1, path, address(this), now.add(1800));
     }
 
     /**
@@ -454,11 +506,13 @@ contract WETHMultiPoolStrategy is IStrategyV2p1 {
     }
 
     function _harvest(uint256 _bankPoolId, uint256 _poolId) internal {
+        PoolInfo storage pool = poolMap[_poolId];
         _claim(_poolId);
-        IERC20 targetToken = poolMap[_poolId].targetToken;
+
+        IERC20 targetToken = pool.targetToken;
         uint256 targetTokenBal = targetToken.balanceOf(address(this));
 
-        if (targetTokenBal < poolMap[_poolId].minHarvestForTakeProfit) return;
+        if (targetTokenBal < pool.minHarvestForTakeProfit) return;
 
         _swapTokens(address(targetToken), address(lpToken), targetTokenBal);
         uint256 wethBal = lpToken.balanceOf(address(this));
@@ -469,10 +523,10 @@ contract WETHMultiPoolStrategy is IStrategyV2p1 {
             address bank = valueVaultMaster.bank();
 
             if (valueVaultMaster.govVaultProfitShareFee() > 0 && profitSharer != address(0)) {
-                address yfv = valueVaultMaster.yfv();
+                address _govToken = valueVaultMaster.yfv();
                 uint256 _govVaultProfitShareFee = wethBal.mul(valueVaultMaster.govVaultProfitShareFee()).div(FEE_DENOMINATOR);
-                _swapTokens(address(lpToken), yfv, _govVaultProfitShareFee);
-                IERC20(yfv).transfer(profitSharer, IERC20(yfv).balanceOf(address(this)));
+                _swapTokens(address(lpToken), _govToken, _govVaultProfitShareFee);
+                IERC20(_govToken).transfer(profitSharer, IERC20(_govToken).balanceOf(address(this)));
                 IProfitSharer(profitSharer).shareProfit();
             }
 
@@ -576,7 +630,7 @@ contract WETHMultiPoolStrategy is IStrategyV2p1 {
 
         // solium-disable-next-line security/no-call-value
         (bool success, bytes memory returnData) = target.call{value: value}(callData);
-        require(success, "WETHSodaPoolStrategy::executeTransaction: Transaction execution reverted.");
+        require(success, "WETHMultiPoolStrategy::executeTransaction: Transaction execution reverted.");
 
         emit ExecuteTransaction(target, value, signature, data);
 

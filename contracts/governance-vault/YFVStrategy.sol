@@ -333,7 +333,7 @@ contract YFVStrategy {
     }
 
     function balanceOf() public view returns (uint256) {
-        return IStandardFarmingPool(pool).balanceOf(address(this));
+        return IERC20(want).balanceOf(address(this)).add(IStandardFarmingPool(pool).balanceOf(address(this)));
     }
 
     function balanceOfPendingReward() public view returns (uint256){

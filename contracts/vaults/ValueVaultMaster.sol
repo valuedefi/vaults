@@ -123,21 +123,25 @@ contract ValueVaultMaster {
 
     function setInsuranceFund(address _insuranceFund) public {
         require(msg.sender == governance, "!governance");
+        require(_insuranceFund <= 2000, "cannot be over 20%");
         insuranceFund = _insuranceFund;
     }
 
     function setPerformanceReward(address _performanceReward) public{
         require(msg.sender == governance, "!governance");
+        require(_performanceReward <= 2000, "cannot be over 20%");
         performanceReward = _performanceReward;
     }
 
     function setGovVaultProfitShareFee(uint256 _govVaultProfitShareFee) public {
         require(msg.sender == governance, "!governance");
+        require(_govVaultProfitShareFee <= 3000, "cannot be over 30%");
         govVaultProfitShareFee = _govVaultProfitShareFee;
     }
 
     function setGasFee(uint256 _gasFee) public {
         require(msg.sender == governance, "!governance");
+        require(_gasFee <= 1000, "cannot be over 10%");
         gasFee = _gasFee;
     }
 
