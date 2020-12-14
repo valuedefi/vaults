@@ -186,9 +186,9 @@ contract YFVStrategy {
     address public output;
     string public getName;
 
-    address constant public yfv = address(0x8E5E172a5eeF097d67981e04C2d6c8810198DEee);
+    address constant public yfv = address(0x45f24BaEef268BB6d63AEe5129015d69702BCDfa);
     address constant public weth = address(0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2);
-    address constant public unirouter = address(0x4eeFDA190A8edB07Ad2Ecf81A5eb1aEb93AFA557);
+    address constant public unirouter = address(0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D);
 
     uint256 public performanceFee = 250; // 2.5%
     uint256 public insuranceFee = 100; // 1%
@@ -204,6 +204,10 @@ contract YFVStrategy {
     address[] public swapRouting;
 
     constructor(address _controller, address _output, address _pool, address _want) public {
+        require(_controller != address(0), "!_controller");
+        require(_output != address(0), "!_output");
+        require(_pool != address(0), "!_pool");
+        require(_want != address(0), "!_want");
         governance = tx.origin;
         controller = _controller;
         output = _output;
@@ -238,13 +242,8 @@ contract YFVStrategy {
     function withdraw(uint256 _amount) external {
         require(msg.sender == controller, "!controller");
         address _vault = IController(controller).vaults(address(want));
-        require(_vault != address(0), "!vault");
-        // additional protection so we don't burn the funds
+        require(_vault != address(0), "!vault"); // additional protection so we don't burn the funds
 
-        uint256 _vaultBalance = IERC20(want).balanceOf(address(_vault));
-        if (_vaultBalance < 2e18) { // Take 2 more YFV for withdraw bonus
-            _amount = _amount.add(2e18);
-        }
         uint256 _balance = IERC20(want).balanceOf(address(this));
         if (_balance < _amount) {
             _amount = _withdrawSome(_amount.sub(_balance));
@@ -278,6 +277,8 @@ contract YFVStrategy {
     // to switch to another pool
     function setNewPool(address _output, address _pool) public {
         require(msg.sender == governance, "!governance");
+        require(_output != address(0), "!_output");
+        require(_pool != address(0), "!_pool");
         harvest();
         withdrawAll();
         output = _output;
@@ -324,7 +325,7 @@ contract YFVStrategy {
     function swap2yfv() internal {
         // path: output -> eth -> yfv
         // swapExactTokensForTokens(amountIn, amountOutMin, path, to, deadline)
-        IUniswapRouter(unirouter).swapExactTokensForTokens(IERC20(output).balanceOf(address(this)), 0, swapRouting, address(this), now.add(1800));
+        IUniswapRouter(unirouter).swapExactTokensForTokens(IERC20(output).balanceOf(address(this)), 1, swapRouting, address(this), now.add(1800));
     }
 
     function _withdrawSome(uint256 _amount) internal returns (uint256) {
@@ -352,26 +353,31 @@ contract YFVStrategy {
 
     function setPerformanceFee(uint256 _performanceFee) public {
         require(msg.sender == governance, "!governance");
+        require(_performanceFee <= 2000, "_performanceFee should be not over 20%");
         performanceFee = _performanceFee;
     }
 
     function setInsuranceFee(uint256 _insuranceFee) public {
         require(msg.sender == governance, "!governance");
+        require(_insuranceFee <= 1000, "_insuranceFee should be not over 10%");
         insuranceFee = _insuranceFee;
     }
 
     function setBurnFee(uint256 _burnFee) public {
         require(msg.sender == governance, "!governance");
+        require(_burnFee <= 500, "_burnFee should be not over 5%");
         burnFee = _burnFee;
     }
 
     function setGasFee(uint256 _gasFee) public {
         require(msg.sender == governance, "!governance");
+        require(_gasFee <= 500, "_gasFee should be not over 5%");
         gasFee = _gasFee;
     }
 
     function setSwapRouting(address[] memory _path) public {
         require(msg.sender == governance, "!governance");
+        require(_path.length >= 2, "_path.length is less than 2");
         swapRouting = _path;
     }
 }

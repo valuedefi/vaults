@@ -199,11 +199,13 @@ contract YFVController {
 
     function setInsuranceFee(uint256 _insuranceFee) public {
         require(msg.sender == governance, "!governance");
+        require(_insuranceFee <= 1000, "_insuranceFee should be not over 10%");
         insuranceFee = _insuranceFee;
     }
 
     function setPerformanceFee(uint256 _performanceFee) public {
         require(msg.sender == governance, "!governance");
+        require(_performanceFee <= 1000, "_performanceFee should be not over 10%");
         performanceFee = _performanceFee;
     }
 
@@ -285,7 +287,8 @@ contract YFVController {
             IERC20(_token).safeApprove(onesplit, 0);
             IERC20(_token).safeApprove(onesplit, _amount);
             (_expected, _distribution) = OneSplitAudit(onesplit).getExpectedReturn(_token, _want, _amount, parts, 0);
-            OneSplitAudit(onesplit).swap(_token, _want, _amount, _expected, _distribution, 0);
+            uint256 _returnAmount = OneSplitAudit(onesplit).swap(_token, _want, _amount, _expected, _distribution, 0);
+            require(_returnAmount > 0, "!_returnAmount");
             _after = IERC20(_want).balanceOf(address(this));
             if (_after > _before) {
                 _amount = _after.sub(_before);

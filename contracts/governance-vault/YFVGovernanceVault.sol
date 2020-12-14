@@ -337,9 +337,9 @@ contract YFVGovernanceVault {
     using SafeMath for uint256;
 
     IERC20 public stakeToken;
-    IERC20 public yfv = IERC20(0x8E5E172a5eeF097d67981e04C2d6c8810198DEee);
-    IERC20 public vUSD = IERC20(0x8E5E172a5eeF097d67981e04C2d6c8810198DEee);
-    IERC20 public vETH = IERC20(0x08e33A1071a6f54419aC2CE2D87abCEddF6cf667);
+    IERC20 public yfv = IERC20(0x45f24BaEef268BB6d63AEe5129015d69702BCDfa);
+    IERC20 public vUSD = IERC20(0x1B8E12F839BD4e73A47adDF76cF7F0097d74c14C);
+    IERC20 public vETH = IERC20(0x76A034e76Aa835363056dd418611E4f81870f16e);
 
     uint256 public fundCap = 9500; // use up to 95% of fund (to keep small withdrawals cheap)
     uint256 public constant FUND_CAP_DENOMINATOR = 10000;
@@ -389,7 +389,7 @@ contract YFVGovernanceVault {
     uint256 public constant TOTAL_REWARD = DEFAULT_EPOCH_REWARD * NUMBER_EPOCHS; // 8,740,000 vUSD (and 8,740 vETH)
 
     uint256 public epochReward = DEFAULT_EPOCH_REWARD;
-    uint256 public minStakingAmount = 0 ether;
+    uint256 public minStakingAmount = 0;
     uint256 public unstakingFrozenTime = 40 hours;
 
     // ** unlockWithdrawFee = 1.92%: stakers will need to pay 1.92% (sent to insurance fund)of amount they want to withdraw if the coin still frozen
@@ -404,6 +404,7 @@ contract YFVGovernanceVault {
     mapping(address => uint256) public accumulatedStakingPower; // will accumulate every time staker does getReward()
 
     mapping(address => bool) public whitelistedPools; // for stake on behalf
+    mapping(address => bool) public approvedStrategies; // to make_profit
 
     event RewardAdded(uint256 reward);
     event YfvRewardAdded(uint256 reward);
@@ -414,6 +415,7 @@ contract YFVGovernanceVault {
     event CommissionPaid(address indexed user, uint256 reward);
 
     constructor (address _stakeToken, uint256 _earnLowerlimit) public {
+        require(_stakeToken != address(0), "!_stakeToken");
         stakeToken = IERC20(_stakeToken);
         getName = string(abi.encodePacked("yfv:GovVault:", IERC20(_stakeToken).name()));
         earnLowerlimit = _earnLowerlimit;
@@ -454,7 +456,7 @@ contract YFVGovernanceVault {
         earnLowerlimit = _earnLowerlimit;
     }
 
-        function addWhitelistedPool(address _addressPool) public {
+    function addWhitelistedPool(address _addressPool) public {
         require(msg.sender == governance, "!governance");
         whitelistedPools[_addressPool] = true;
     }
@@ -462,6 +464,16 @@ contract YFVGovernanceVault {
     function removeWhitelistedPool(address _addressPool) public {
         require(msg.sender == governance, "!governance");
         whitelistedPools[_addressPool] = false;
+    }
+
+    function approveStrategy(address _strategy) public {
+        require(msg.sender == governance, "!governance");
+        approvedStrategies[_strategy] = true;
+    }
+
+    function unapproveStrategy(address _strategy) public {
+        require(msg.sender == governance, "!governance");
+        approvedStrategies[_strategy] = false;
     }
 
     function setYfvInsuranceFund(address _yfvInsuranceFund) public {
@@ -494,12 +506,14 @@ contract YFVGovernanceVault {
     // To upgrade vUSD contract (v1 is still experimental, we may need vUSDv2 with rebase() function working soon - then governance will call this upgrade)
     function upgradeVUSDContract(address _vUSDContract) public {
         require(msg.sender == governance, "!governance");
+        require(_vUSDContract != address(0), "!_vUSDContract");
         vUSD = IERC20(_vUSDContract);
     }
 
     // To upgrade vETH contract (v1 is still experimental, we may need vETHv2 with rebase() function working soon - then governance will call this upgrade)
     function upgradeVETHContract(address _vETHContract) public {
         require(msg.sender == governance, "!governance");
+        require(_vETHContract != address(0), "!_vETHContract");
         vETH = IERC20(_vETHContract);
     }
 
@@ -534,14 +548,10 @@ contract YFVGovernanceVault {
 
     // vUSD balance
     function earned(address account) public view returns (uint256) {
-        uint256 calculatedEarned = stakers[account].stake
+        return stakers[account].stake
             .mul(rewardPerToken().sub(userRewardPerTokenPaid[account]))
             .div(1e18)
             .add(rewards[account]);
-        uint256 poolBalance = vUSD.balanceOf(address(this));
-        // some rare case the reward can be slightly bigger than real number, we need to check against how much we have left in pool
-        if (calculatedEarned > poolBalance) return poolBalance;
-        return calculatedEarned;
     }
 
     function stakingPower(address account) public view returns (uint256) {
@@ -642,6 +652,7 @@ contract YFVGovernanceVault {
 
     function make_profit(uint256 amount) public {
         require(amount > 0, "not 0");
+        require(approvedStrategies[msg.sender], "!approved strategy");
         yfv.safeTransferFrom(msg.sender, address(this), amount);
         global.earnings_per_share = global.earnings_per_share.add(
             amount.mul(magnitude).div(global.total_stake)
@@ -677,13 +688,6 @@ contract YFVGovernanceVault {
         stakers[msg.sender].total_out = stakers[msg.sender].total_out.add(out);
 
         if (out > 0) {
-            uint256 _stakeTime = now - lastStakeTimes[msg.sender];
-            if (_stakeTime < 1 days) { // deposit in 24h
-                uint256 actually_out = _stakeTime.mul(out).mul(1e18).div(1 days).div(1e18);
-                uint256 to_team = out.sub(actually_out);
-                yfv.safeTransfer(IController(controller).performanceReward(), to_team);
-                out = actually_out;
-            }
             yfv.safeTransfer(msg.sender, out);
         }
     }
@@ -707,7 +711,6 @@ contract YFVGovernanceVault {
     }
 
     modifier checkNextEpoch() {
-        require(periodFinish > 0, "Pool has not started");
         if (block.timestamp >= periodFinish) {
             currentEpochReward = epochReward;
 
@@ -744,6 +747,7 @@ contract YFVGovernanceVault {
 
         // cant take staked asset
         require(_token != yfv, "yfv");
+        require(_token != stakeToken, "stakeToken");
 
         // cant take reward asset
         require(_token != vUSD, "vUSD");
